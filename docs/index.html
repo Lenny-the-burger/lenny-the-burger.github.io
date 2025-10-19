@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Emscripten TUI in a Real Terminal Emulator (xterm.js)</title>
+	<!--
+	  HOW TO USE
+	  1) Build your TUI app with Emscripten (example C program and build command below).
+	  2) Place the generated app.js and app.wasm next to this HTML file.
+	  3) Open this HTML in a static server (any file server). The TUI will run inside the terminal emulator.
+
+	  Build with Emscripten (requires emsdk):
+
+		emcc main.c -O3 \
+		  -sUSE_CURSES=1 \
+		  -sENVIRONMENT=web \
+		  -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
+		  -sMODULARIZE=1 -sEXPORT_NAME=createApp \
+		  -sALLOW_MEMORY_GROWTH=1 \
+		  -o app.js
+
+	  Notes:
+		� -sUSE_CURSES=1 gives you a curses-compatible TUI.
+		� -sMODULARIZE=1 + -sEXPORT_NAME=createApp makes the JS glue export a factory named createApp().
+		� This page wires stdin/stdout/stderr between Emscripten and xterm.js, giving you a real terminal emulator in the browser.
+	-->
+	<link rel="stylesheet" href="https://unpkg.com/xterm/css/xterm.css" />
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: #0b0e14; /* dark background */
+        }
+
+        #app {
+            height: 100%;
+            display: grid;
+            grid-template-rows: auto 1fr;
+        }
+
+        header {
+            color: #cbd5e1;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            padding: 10px 14px;
+            border-bottom: 1px solid #1f2937;
+            background: #0f131a;
+        }
+
+        #terminal {
+            height: 100%;
+        }
+
+        .bar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            font-size: 12px;
+            opacity: .85;
+        }
+
+        .btn {
+            cursor: pointer;
+            padding: 4px 8px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+        }
+
+            .btn:hover {
+                background: #111827;
+            }
+
+        .status {
+            margin-left: auto;
+        }
+    </style>
+</head>
+
+<body>
+	<div id="app">
+		<header>
+			<div class="bar">
+				<strong>Emscripten TUI Terminal</strong>
+				<span class="btn" id="resetBtn">Reset</span>
+				<span class="btn" id="pasteBtn">Paste...</span>
+				<span class="status" id="status">loading...</span>
+			</div>
+		</header>
+		<div id="terminal"></div>
+	</div>
+
+	<script src="https://unpkg.com/xterm/lib/xterm.js"></script>
+	<script> 
+	(async function () {
+		// 1) Create a real terminal emulator in the browser
+		const term = new Terminal({
+			convertEol: true,
+			cursorBlink: true,
+			fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+			allowProposedApi: true,
+			scrollOnUserInput: true,
+		});
+		term.open(document.getElementById('terminal'));
+
+		const statusEl = document.getElementById('status');
+		function setStatus(msg) { statusEl.textContent = msg; }
+
+		// For stdin -> Emscripten
+		const inputQueue = [];
+		function enqueueInput(data) {
+			// xterm gives UTF-16 JS strings; TTY expects bytes. We'll push raw char codes.
+			for (let i = 0; i < data.length; i++) {
+			inputQueue.push(data.charCodeAt(i) & 0xFF);
+			}
+		}
+
+		term.onData(enqueueInput);
+
+		// 2) Wire Emscripten TTY to xterm.js
+		//	We define the Module BEFORE loading app.js
+		window.Module = {
+			noInitialRun: false, // we want main() to run automatically
+			// Environment for curses-style apps
+			preRun: [function() {
+			if (!Module.ENV) Module.ENV = {};
+			Module.ENV.TERM = 'xterm-256color';
+			// Rough size hints; some ncurses apps will query this
+			Module.ENV.LINES = String(term.rows);
+			Module.ENV.COLUMNS = String(term.cols);
+			}],
+			print: (text) => { term.write(String(text) + '\r\n'); },
+			printErr: (text) => { term.write('\u001b[31m' + String(text) + '\u001b[0m' + '\r\n'); },
+			stdin: () => {
+			// Return next byte when available, or null for Emscripten to poll later
+			return inputQueue.length ? inputQueue.shift() : null;
+			},
+			setStatus: setStatus,
+			onAbort: (reason) => { setStatus('aborted: ' + reason); },
+			onExit: (status) => { setStatus('exited (' + status + ')'); },
+		};
+
+		// Handle window resize -> inform the app (best-effort)
+		function syncSizeToEnv() {
+			if (!window.Module) return;
+			if (!Module.ENV) Module.ENV = {};
+			Module.ENV.LINES = String(term.rows);
+			Module.ENV.COLUMNS = String(term.cols);
+			// Some apps respond to SIGWINCH; Emscripten has limited support.
+			// If your app handles it, you can expose a function and call it here via ccall.
+		}
+
+		window.addEventListener('resize', () => {
+			// xterm.js resizes automatically based on CSS; update ENV hints too.
+			syncSizeToEnv();
+		});
+
+		// Toolbar buttons
+		document.getElementById('resetBtn').onclick = () => {
+			term.reset();
+			setStatus('reset');
+		};
+		document.getElementById('pasteBtn').onclick = async () => {
+			try {
+			const text = await navigator.clipboard.readText();
+			enqueueInput(text);
+			} catch (e) {
+			alert('Clipboard read failed. Paste with right-click or Ctrl+V inside the terminal.');
+			}
+		};
+
+		// 3) Load your Emscripten-built app (expects app.js & app.wasm beside this file)
+		setStatus('loading app.wasm...');
+
+		// Load app.js dynamically so we can call its factory (createApp)
+		await new Promise((resolve, reject) => {
+			const s = document.createElement('script');
+			s.src = 'app.js';
+			s.onload = resolve;
+			s.onerror = () => reject(new Error('Failed to load app.js'));
+			document.head.appendChild(s);
+		});
+
+		if (typeof createApp !== 'function') {
+			term.write('\r\n\x1b[31mCould not find createApp(). Did you build with -sMODULARIZE=1 -sEXPORT_NAME=createApp ?\x1b[0m\r\n');
+			setStatus('error');
+			return;
+		}
+
+		try {
+			// createApp will instantiate the wasm and run main() because noInitialRun=false
+			const instance = await createApp(Module);
+			window._appInstance = instance; // for debugging in devtools
+			setStatus('running');
+		} catch (e) {
+			setStatus('init failed');
+			term.write('\r\n\x1b[31mWASM init failed:\x1b[0m ' + (e && e.message ? e.message : String(e)) + '\r\n');
+		}
+	})();
+	</script>
+</body>
+</html>
