@@ -24,6 +24,10 @@
 		.xterm-screen {
 			overflow: hidden !important;
 		}
+
+		.xterm-viewport {
+			overflow: hidden !important;
+		}
 	</style>
 </head>
 <body>
@@ -32,60 +36,73 @@
 	<script src="https://unpkg.com/xterm/lib/xterm.js"></script>
 	<script>
   (async function () {
-    const term = new Terminal({
-      convertEol: true,
-      cursorBlink: true,
-      fontFamily: 'ui-monospace, monospace',
-      theme: { background: '#000', foreground: '#ccc' },
-      scrollback: 0               // disable xterm.js scrollback buffer
-    });
-    term.open(document.getElementById('terminal'));
-
-    const inputQueue = [];
-    term.onData(data => {
-      for (let i = 0; i < data.length; i++)
-        inputQueue.push(data.charCodeAt(i) & 0xff);
-    });
-
-    const Module = {
-      noInitialRun: false,
-      preRun: [() => {
-        if (!Module.ENV) Module.ENV = {};
-        Module.ENV.TERM = 'xterm-256color';
-        Module.ENV.LINES = String(term.rows);
-        Module.ENV.COLUMNS = String(term.cols);
-      }],
-      print: text => term.write(text + '\r\n'),
-      printErr: text => term.write('\x1b[31m' + text + '\x1b[0m\r\n'),
-      stdin: () => (inputQueue.length ? inputQueue.shift() : null),
-      onAbort: r => term.write('\r\naborted: ' + r + '\r\n'),
-      onExit: s => term.write('\r\n(exit ' + s + ')\r\n'),
-    };
-    window.Module = Module;
-
-    function resize() {
-      if (!Module.ENV) Module.ENV = {};
-      Module.ENV.LINES = String(term.rows);
-      Module.ENV.COLUMNS = String(term.cols);
-    }
-    window.addEventListener('resize', resize);
-
-    try {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'app.js';
-        s.onload = resolve;
-        s.onerror = () => reject('app.js load failed');
-        document.head.appendChild(s);
+	const term = new Terminal({
+	  convertEol: true,
+	  cursorBlink: true,
+	  fontFamily: 'ui-monospace, monospace',
+	  theme: { background: '#000', foreground: '#ccc' },
+	  scrollback: 0			   // disable xterm.js scrollback buffer
+	});
+	  term.open(document.getElementById('terminal'));
+      term.attachCustomKeyEventHandler(e => {
+          // If Ctrl+C (or Cmd+C) is pressed with a selection, let the browser copy
+          if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+              const selection = term.getSelection();
+              if (selection && selection.length > 0) {
+                  // Let the browser copy it — don’t send to the TUI
+                  return true;
+              }
+              // If nothing is selected, block it so it doesn't kill your app
+              return false;
+          }
+          return true;
       });
-      if (typeof createApp !== 'function') {
-        term.write('\x1b[31mError: createApp() not found. Did you build with -sMODULARIZE=1 -sEXPORT_NAME=createApp?\x1b[0m\r\n');
-        return;
-      }
-      await createApp(Module);
-    } catch (e) {
-      term.write('\x1b[31mWASM init failed:\x1b[0m ' + e + '\r\n');
-    }
+
+	const inputQueue = [];
+	term.onData(data => {
+		for (let i = 0; i < data.length; i++)
+		inputQueue.push(data.charCodeAt(i) & 0xff);
+	});
+
+	const Module = {
+	  noInitialRun: false,
+	  preRun: [() => {
+		if (!Module.ENV) Module.ENV = {};
+		Module.ENV.TERM = 'xterm-256color';
+		Module.ENV.LINES = String(term.rows);
+		Module.ENV.COLUMNS = String(term.cols);
+	  }],
+	  print: text => term.write(text + '\r\n'),
+	  printErr: text => term.write('\x1b[31m' + text + '\x1b[0m\r\n'),
+	  stdin: () => (inputQueue.length ? inputQueue.shift() : null),
+	  onAbort: r => term.write('\r\naborted: ' + r + '\r\n'),
+	  onExit: s => term.write('\r\n(exit ' + s + ')\r\n'),
+	};
+	window.Module = Module;
+
+	function resize() {
+	  if (!Module.ENV) Module.ENV = {};
+	  Module.ENV.LINES = String(term.rows);
+	  Module.ENV.COLUMNS = String(term.cols);
+	}
+	window.addEventListener('resize', resize);
+
+	try {
+	  await new Promise((resolve, reject) => {
+		const s = document.createElement('script');
+		s.src = 'app.js?v=' + Date.now();
+		s.onload = resolve;
+		s.onerror = () => reject('app.js load failed');
+		document.head.appendChild(s);
+	  });
+	  if (typeof createApp !== 'function') {
+		term.write('\x1b[31mError: createApp() not found. Did you build with -sMODULARIZE=1 -sEXPORT_NAME=createApp?\x1b[0m\r\n');
+		return;
+	  }
+	  await createApp(Module);
+	} catch (e) {
+	  term.write('\x1b[31mWASM init failed:\x1b[0m ' + e + '\r\n');
+	}
   })();
 	</script>
 </body>
